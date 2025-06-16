@@ -15,6 +15,30 @@ eye_cascade = cv2.CascadeClassifier('haarcascade/haarcascade_eye.xml')
 # mixer.init()
 # sound = mixer.Sound('alarm.mp3')
 
+import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import av
+import cv2
+import numpy as np
+
+st.title("Drowsiness Detection (WebRTC)")
+
+class DrowsinessProcessor(VideoProcessorBase):
+    def __init__(self):
+        # load model & cascade
+        self.face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+        # inisialisasi lainnya...
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, 1.2, 5)
+        for (x, y, w, h) in faces:
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0,255,0), 2)
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+webrtc_streamer(key="drowsiness", video_processor_factory=DrowsinessProcessor)
+
 # Set up video capture
 cap = cv2.VideoCapture(0)
 
