@@ -7,4 +7,6 @@ pygame==2.5.0
 opencv-python-headless==4.8.0.74
 streamlit-webrtc==0.46.0
 numpy
-av
+avstreamlit==1.35.0
+av==10.0.0
+
