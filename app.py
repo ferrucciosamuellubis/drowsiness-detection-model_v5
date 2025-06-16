@@ -1,98 +1,84 @@
-import os
-os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
+# Buat ulang app.py dengan UI yang lebih menarik dan mendukung dua metode input:
+# 1. Kamera real-time via WebRTC
+# 2. Upload gambar langsung untuk deteksi mata mengantuk
 
+enhanced_app_py = '''
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
 import cv2
 import numpy as np
-from tensorflow.keras.models import load_model
-import time
-import subprocess
-import platform
+from keras.models import load_model
+from PIL import Image
 
-st.set_page_config(page_title="Drowsiness Detection", page_icon="🚗")
-st.title("🚗 Drowsiness Detection System")
+# Load model dan classifier
+model = load_model("models/cnncat2.h5")
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt.xml")
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye_tree_eyeglasses.xml")
 
-# Load model
-@st.cache_resource
-def load_drowsiness_model():
-    try:
-        return load_model("Model.h5", compile=False)
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
-        return None
+st.set_page_config(page_title="Drowsiness Detection App", layout="wide")
+st.title("😴 Drowsiness Detection App")
+st.markdown("Pilih metode input untuk mendeteksi kantuk: Kamera atau Gambar Upload")
 
-model = load_drowsiness_model()
+tabs = st.tabs(["📷 Kamera Real-Time", "🖼️ Upload Gambar"])
 
-# Load cascades
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
-if face_cascade.empty(): st.error("Could not load face cascade")
-if eye_cascade.empty(): st.error("Could not load eye cascade")
+# ========================
+# KAMERA REAL-TIME
+# ========================
+with tabs[0]:
+    class VideoProcessor(VideoProcessorBase):
+        def __init__(self):
+            self.score = 0
 
-# Alarm
-def play_alarm():
-    audio = "alarm.mp3"
-    try:
-        sys = platform.system()
-        if sys == "Darwin":
-            subprocess.Popen(['afplay', audio])
-        elif sys == "Linux":
-            try:
-                subprocess.Popen(['aplay', audio])
-            except FileNotFoundError:
-                try: subprocess.Popen(['paplay', audio])
-                except: st.warning("🔊 Alarm: DROWSINESS DETECTED!")
-        elif sys == "Windows":
-            import winsound
-            winsound.PlaySound(audio, winsound.SND_FILENAME)
-    except:
-        st.warning("🔊 DROWSINESS DETECTED!")
+        def recv(self, frame):
+            img = frame.to_ndarray(format="bgr24")
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
 
-class VideoProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.score = 0
-        self.last_alarm = time.time()
-
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 3)
-
-        for x, y, w, h in faces:
-            cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
-            roi_gray = gray[y:y+h, x:x+w]
-            eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 3)
-            for ex, ey, ew, eh in eyes:
-                cv2.rectangle(img, (x+ex, y+ey), (x+ex+ew, y+ey+eh), (0, 255, 0), 2)
-                roi = roi_gray[ey:ey+eh, ex:ex+ew]
-                if roi.size > 0 and model:
-                    eye = cv2.resize(roi, (80, 80))/255.0
-                    eye = eye.reshape(-1,80,80,1)
-                    pred = model.predict(eye, verbose=0)[0,0]
-                    if pred < 0.5:
-                        self.score += 1
+            for (x, y, w, h) in faces:
+                roi_gray = gray[y:y + h, x:x + w]
+                roi_color = img[y:y + h, x:x + w]
+                eyes = eye_cascade.detectMultiScale(roi_gray)
+                for (ex, ey, ew, eh) in eyes:
+                    eye = roi_color[ey:ey + eh, ex:ex + ew]
+                    eye = cv2.resize(eye, (80, 80))
+                    eye = eye / 255.0
+                    eye = np.expand_dims(eye, axis=0)
+                    prediction = model.predict(eye)
+                    if prediction[0][0] > 0.5:
+                        cv2.putText(img, "Mengantuk", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                     else:
-                        self.score = max(0, self.score -1)
+                        cv2.putText(img, "Tidak Mengantuk", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    break
+                break
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        cv2.putText(img, f"Score: {self.score}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0),2)
+    webrtc_streamer(
+        key="drowsy-stream",
+        video_processor_factory=VideoProcessor,
+        rtc_configuration=RTCConfiguration({"iceServers": []})
+    )
 
-        if self.score > 15:
-            cv2.putText(img, "DROWSINESS ALERT!", (10,60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255),2)
-            if time.time() - self.last_alarm > 2:
-                play_alarm()
-                self.last_alarm = time.time()
+# ========================
+# UPLOAD GAMBAR
+# ========================
+with tabs[1]:
+    uploaded_file = st.file_uploader("Upload gambar wajah untuk deteksi kantuk:", type=["jpg", "png", "jpeg"])
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+    if uploaded_file:
+        img = Image.open(uploaded_file).convert("RGB")
+        img_resized = img.resize((80, 80))
+        img_array = np.array(img_resized) / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
 
-# WebRTC setup
-rtc_conf = RTCConfiguration({"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]})
-webrtc_streamer(key="drowsiness", video_processor_factory=VideoProcessor, rtc_configuration=rtc_conf)
+        prediction = model.predict(img_array)
 
-# Instructions
-st.markdown("""
-**Instructions:**
-1. Izinkan akses kamera ketika diminta.
-2. Pastikan wajah terlihat jelas.
-3. Alarm berbunyi saat "Score" > 15.
-""")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(img, caption="Gambar yang Diunggah", use_column_width=True)
+        with col2:
+            if prediction[0][0] > 0.5:
+                st.error("❌ Deteksi: Mengantuk")
+            else:
+                st.success("✅ Deteksi: Tidak Mengantuk")
+'''
