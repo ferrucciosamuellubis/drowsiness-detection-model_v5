@@ -1,71 +1,98 @@
+import os
+os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
+
+import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import cv2
 import numpy as np
-import av
 from tensorflow.keras.models import load_model
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
-import streamlit as st
-import os
+import time
+import subprocess
+import platform
 
-# Load model and cascade
-model = load_model("Model.h5")
+st.set_page_config(page_title="Drowsiness Detection", page_icon="🚗")
+st.title("🚗 Drowsiness Detection System")
 
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+# Load model
+@st.cache_resource
+def load_drowsiness_model():
+    try:
+        return load_model("Model.h5", compile=False)
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        return None
 
-# UI
-st.set_page_config(layout="centered")
-st.markdown("## 🔴 Drowsiness Detection (WebRTC)")
+model = load_drowsiness_model()
 
-# Audio file for alarm
-ALARM_PATH = "alarm.mp3"
-if not os.path.exists(ALARM_PATH):
-    st.warning("alarm.mp3 file not found!")
+# Load cascades
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+if face_cascade.empty(): st.error("Could not load face cascade")
+if eye_cascade.empty(): st.error("Could not load eye cascade")
+
+# Alarm
+def play_alarm():
+    audio = "alarm.mp3"
+    try:
+        sys = platform.system()
+        if sys == "Darwin":
+            subprocess.Popen(['afplay', audio])
+        elif sys == "Linux":
+            try:
+                subprocess.Popen(['aplay', audio])
+            except FileNotFoundError:
+                try: subprocess.Popen(['paplay', audio])
+                except: st.warning("🔊 Alarm: DROWSINESS DETECTED!")
+        elif sys == "Windows":
+            import winsound
+            winsound.PlaySound(audio, winsound.SND_FILENAME)
+    except:
+        st.warning("🔊 DROWSINESS DETECTED!")
 
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.score = 0
-        self.alert_displayed = False
+        self.last_alarm = time.time()
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+    def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.2, 5)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 3)
 
-        for (x, y, w, h) in faces:
-            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        for x, y, w, h in faces:
+            cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
+            roi_gray = gray[y:y+h, x:x+w]
+            eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 3)
+            for ex, ey, ew, eh in eyes:
+                cv2.rectangle(img, (x+ex, y+ey), (x+ex+ew, y+ey+eh), (0, 255, 0), 2)
+                roi = roi_gray[ey:ey+eh, ex:ex+ew]
+                if roi.size > 0 and model:
+                    eye = cv2.resize(roi, (80, 80))/255.0
+                    eye = eye.reshape(-1,80,80,1)
+                    pred = model.predict(eye, verbose=0)[0,0]
+                    if pred < 0.5:
+                        self.score += 1
+                    else:
+                        self.score = max(0, self.score -1)
 
-        eyes = eye_cascade.detectMultiScale(gray)
-        for (ex, ey, ew, eh) in eyes:
-            eye = img[ey:ey + eh, ex:ex + ew]
-            eye = cv2.resize(eye, (80, 80))
-            eye = eye / 255.0
-            eye = np.expand_dims(eye, axis=0)
+        cv2.putText(img, f"Score: {self.score}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0),2)
 
-            pred = model.predict(eye, verbose=0)
-            if pred[0][0] > 0.3:  # Closed
-                self.score += 1
-            else:
-                self.score -= 1
-
-            self.score = max(0, min(self.score, 30))
-
-        # Alarm
-        if self.score > 15 and not self.alert_displayed:
-            self.alert_displayed = True
-            os.system(f"ffplay -nodisp -autoexit {ALARM_PATH} &")
-        elif self.score <= 15:
-            self.alert_displayed = False
-
-        # Show score
-        cv2.putText(img, f"Score: {self.score}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        if self.score > 15:
+            cv2.putText(img, "DROWSINESS ALERT!", (10,60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255),2)
+            if time.time() - self.last_alarm > 2:
+                play_alarm()
+                self.last_alarm = time.time()
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+# WebRTC setup
+rtc_conf = RTCConfiguration({"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]})
+webrtc_streamer(key="drowsiness", video_processor_factory=VideoProcessor, rtc_configuration=rtc_conf)
 
-webrtc_streamer(
-    key="example",
-    video_processor_factory=VideoProcessor,
-    media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,
-)
+# Instructions
+st.markdown("""
+**Instructions:**
+1. Izinkan akses kamera ketika diminta.
+2. Pastikan wajah terlihat jelas.
+3. Alarm berbunyi saat "Score" > 15.
+""")
