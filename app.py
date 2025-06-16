@@ -1,121 +1,107 @@
-import cv2
-import numpy as np
-import streamlit as st
-# from pygame import mixer
-from tensorflow.keras.models import load_model
-
-# Load the trained model
-model = load_model('Model.h5')
-
-# Load the cascade classifiers
-face_cascade = cv2.CascadeClassifier('haarcascade/haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier('haarcascade/haarcascade_eye.xml')
-
-# Initialize audio mixer
-# mixer.init()
-# sound = mixer.Sound('alarm.mp3')
-
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import av
 import cv2
 import numpy as np
 
-st.title("Drowsiness Detection (WebRTC)")
+# --- Konfigurasi alarm ---
+ALARM_AUDIO_PATH = "alarm.mp3"  # pastikan file alarm.mp3 ada di folder yang sama
 
+# --- Streamlit UI ---
+st.title("🔴 Drowsiness Detection (WebRTC)")
+
+# Tombol play alarm (preload audio)
+alarm_audio = None
+with open(ALARM_AUDIO_PATH, "rb") as f:
+    alarm_audio = f.read()
+
+# --- Processor untuk deteksi kantuk ---
 class DrowsinessProcessor(VideoProcessorBase):
     def __init__(self):
-        # load model & cascade
-        self.face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-        # inisialisasi lainnya...
+        # load cascades yang path-nya pasti ada
+        self.face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        self.eye_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_eye.xml"
+        )
+        # load model TensorFlow / Keras
+        from tensorflow.keras.models import load_model
+        self.model = load_model("Model.h5")
+        
+        # state
+        self.score = 0
+        self.alerted = False
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
         faces = self.face_cascade.detectMultiScale(gray, 1.2, 5)
         for (x, y, w, h) in faces:
-            cv2.rectangle(img, (x, y), (x+w, y+h), (0,255,0), 2)
+            # Crop area wajah
+            roi_gray = gray[y : y + h, x : x + w]
+            eyes = self.eye_cascade.detectMultiScale(roi_gray, 1.1, 3)
+            
+            # Gambar kotak wajah
+            cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            
+            # Proses tiap mata
+            for (ex, ey, ew, eh) in eyes:
+                ex_abs, ey_abs = x + ex, y + ey
+                eye_img = img[ey_abs : ey_abs + eh, ex_abs : ex_abs + ew]
+                
+                # Pre‑processing model
+                eye = cv2.resize(eye_img, (80, 80))
+                eye = eye / 255.0
+                eye = np.expand_dims(eye, axis=0)
+                
+                # Prediksi
+                pred = self.model.predict(eye, verbose=0)[0]
+                closed_prob, open_prob = pred[0], pred[1]
+                
+                if closed_prob > 0.30:
+                    self.score += 1
+                else:
+                    self.score = max(0, self.score - 1)
+                
+                # Gambar overlay status
+                status = "Closed" if closed_prob > open_prob else "Open"
+                cv2.putText(
+                    img,
+                    f"{status} | Score: {self.score}",
+                    (10, img.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0) if status == "Open" else (0, 0, 255),
+                    2,
+                )
+                
+                # Jika score melewati threshold dan belum di‑alert
+                if self.score > 15 and not self.alerted:
+                    # Trigger alarm di UI
+                    st.session_state["play_alarm"] = True
+                    self.alerted = True
+                elif self.score <= 15 and self.alerted:
+                    # Reset alert jika sudah bangun
+                    st.session_state["play_alarm"] = False
+                    self.alerted = False
+
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-webrtc_streamer(key="drowsiness", video_processor_factory=DrowsinessProcessor)
 
-# Set up video capture
-cap = cv2.VideoCapture(0)
+# Inisialisasi state untuk alarm
+if "play_alarm" not in st.session_state:
+    st.session_state["play_alarm"] = False
 
-# Initialize variables
-Score = 0
-eyes_closed = False
-alert_displayed = False
+# Jalankan streamer WebRTC
+webrtc_ctx = webrtc_streamer(
+    key="drowsiness",
+    video_processor_factory=DrowsinessProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
 
-# Streamlit app
-st.title('Drowsiness Detection App')
-
-# Placeholder for the final frame
-output_frame = st.empty()
-
-# Create two columns for buttons
-col1, col2 = st.columns(2)
-
-# Button to start the Drowsiness Detection
-start_button = col1.button('Start')
-
-# Button to stop the Drowsiness Detection
-stop_button = col2.button('Stop')
-
-if start_button:
-    while True:
-        ret, frame = cap.read()
-        height, width = frame.shape[0:2]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5)
-        eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=1)
-        
-        cv2.rectangle(frame, (0, height-50), (200, height), (0, 0, 0), thickness=cv2.FILLED)
-        
-        for (x, y, w, h) in faces:
-            cv2.rectangle(frame, pt1=(x, y), pt2=(x+w, y+h), color=(255, 0, 0), thickness=3)
-            
-        for (ex, ey, ew, eh) in eyes:
-            eye = frame[ey:ey+eh, ex:ex+ew]
-            eye = cv2.resize(eye, (80, 80))
-            eye = eye / 255
-            eye = eye.reshape(80, 80, 3)
-            eye = np.expand_dims(eye, axis=0)
-            
-            prediction = model.predict(eye)
-            
-            if prediction[0][0] > 0.30:  # Closed eyes
-                cv2.putText(frame, 'closed', (10, height-20), fontFace=cv2.FONT_HERSHEY_COMPLEX_SMALL, fontScale=1, color=(255, 255, 255),
-                            thickness=1, lineType=cv2.LINE_AA)
-                cv2.putText(frame, 'Score: ' + str(Score), (100, height-20), fontFace=cv2.FONT_HERSHEY_COMPLEX_SMALL, fontScale=1, color=(255, 255, 255),
-                            thickness=1, lineType=cv2.LINE_AA)
-                Score += 1
-                if Score > 15 and not alert_displayed:
-                    try:
-                        # sound.play()
-                        st.warning("Eyes are closed!")
-                        alert_displayed = True
-                    except:
-                        pass
-                
-            elif prediction[0][1] > 0.90:  # Open eyes
-                cv2.putText(frame, 'open', (10, height-20), fontFace=cv2.FONT_HERSHEY_COMPLEX_SMALL, fontScale=1, color=(255, 255, 255),
-                            thickness=1, lineType=cv2.LINE_AA)      
-                cv2.putText(frame, 'Score: ' + str(Score), (100, height-20), fontFace=cv2.FONT_HERSHEY_COMPLEX_SMALL, fontScale=1, color=(255, 255, 255),
-                            thickness=1, lineType=cv2.LINE_AA)
-                Score -= 1
-                if Score < 0:
-                    Score = 0
-                if alert_displayed:
-                    st.warning("")
-                    alert_displayed = False
-        
-        # Update the output frame with the processed frame
-        output_frame.image(frame, channels='BGR')
-        
-        if stop_button:
-            break
-            
-    cap.release()
-    cv2.destroyAllWindows()
+# Setelah menjalankan frame, jika terdeteksi kantuk -> putar alarm
+if st.session_state["play_alarm"]:
+    st.audio(alarm_audio, format="audio/mp3", start_time=0)
